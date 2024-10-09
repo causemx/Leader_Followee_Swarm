@@ -3,8 +3,9 @@ import os
 import socket
 import fcntl
 import struct
-import time,datetime,numbers
-import threading
+import time
+import datetime
+import numbers
 from MissionUtil import MissionUtil
 import numpy as np
 #from pymavlink import mavutil
@@ -13,7 +14,6 @@ import binascii
 
 from numpy import radians, sin, cos, arcsin, sqrt
 
-import numbers, datetime, time
 import json
 
 modname = ardupilotmega.MAVLink(0,0,0,False)

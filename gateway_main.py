@@ -1,107 +1,144 @@
-import socket,time,os
+import socket
+import time
+import os
 import threading
 import sys
+from decimal import Decimal
+from typing import Dict, Callable
+
 import control_func
-from decimal import *
 
+# Constants
+STATUS_PATH = r"/home/pi/status.txt"
+HOST_GATEWAY = "192.168.199.255"
+PORT_BINDING = 24550
+PORT_SENDING = 24551
+BUFFER_SIZE = 1024
 
+# Socket setup
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-statusKeyWithSubkeys = [
-    'GPS_RAW_INT-lat'
-    ,'GPS_RAW_INT-lon'
-    ,'GLOBAL_POSITION_INT-relative_alt'             # 20
-    ,'GLOBAL_POSITION_INT-hdg'                      #yaw
+STATUS_KEYS = [
+    'GPS_RAW_INT-lat',
+    'GPS_RAW_INT-lon',
+    'GLOBAL_POSITION_INT-relative_alt',
+    'GLOBAL_POSITION_INT-hdg'
 ]
 
+# Subkey handlers
+SUBKEY_HANDLERS: Dict[str, Callable[[str], str]] = {
+    "lat": lambda x: str(Decimal(x) / Decimal(1e7)),
+    "lon": lambda x: str(Decimal(x) / Decimal(1e7)),
+    "relative_alt": lambda x: str(Decimal(x) / Decimal(1000)),
+    "hdg": lambda x: str(Decimal(x) / Decimal(100)),
+}
+
 def udp_listener():
-    s.bind(("",24550))
-    while True :
-        try :
-            data,addr=s.recvfrom(1024)
-            data = data.decode()
-            print(data)
-        except :
-            continue
+    s.bind(("", PORT_BINDING))
+    while True:
+        try:
+            data, addr = s.recvfrom(BUFFER_SIZE)
+            print(data.decode())
+        except Exception as e:
+            print(f"Error in UDP listener: {e}")
 
-def cmd_sending(cmd):
-    s.sendto(cmd.encode('utf-8'),("192.168.199.255",24551))
+def cmd_sending(cmd: str):
+    print(f"Sending command: {cmd}")
+    s.sendto(cmd.encode('utf-8'), (HOST_GATEWAY, PORT_SENDING))
 
-def boardcast_pos_loop():
-    while True :
-        pos_data = "leaderPos"
+def broadcast_pos_loop():
+    while True:
         leader_status = responses()
         if leader_status != "":
-            pos_data += leader_status
+            pos_data = f"leaderPos{leader_status}"
             cmd_sending(pos_data)
         time.sleep(0.1)
 
-def responses():
+def responses() -> str:
     cust_status = control_func.GetStatus()
+    
+    if not os.path.isfile(STATUS_PATH):
+        return "Status file not found"
+
     try:
-        res_str = ""
-        status_path = r"/home/pi/status.txt"
-        if os.path.isfile(status_path):
-            status = cust_status.readContent(status_path)
-            if status != "":
-                for i in range(len(statusKeyWithSubkeys)):
-                    entry = statusKeyWithSubkeys[i].split('-')[0]
-                    subKey = statusKeyWithSubkeys[i].split('-')[1]
-                    if subKey == "lat" or subKey == "lon" :
-                        temp = Decimal(cust_status.get_status(entry,subKey,status)) / Decimal(1e7)
-                        res_str += ' ' + str(temp)
-                    elif subKey == "relative_alt" :
-                        temp = Decimal(cust_status.get_status(entry,subKey,status)) / Decimal(1000)
-                        res_str += ' ' + str(temp)
-                    elif subKey == subKey == "hdg" :
-                        temp = Decimal(cust_status.get_status(entry,subKey,status)) / Decimal(100)
-                        res_str += ' ' + str(temp)
+        status = cust_status.readContent(STATUS_PATH)
+        if not status:
+            return "Status is empty"
+
+        result = []
+        for status_key in STATUS_KEYS:
+            entry, subkey = status_key.split('-')
+            value = cust_status.get_status(entry, subkey, status)
+            handler = SUBKEY_HANDLERS.get(subkey, lambda x: x)
+            result.append(handler(value))
+
+        return ' '.join(result)
+
     except Exception as e:
-        print(e)
-    return res_str
+        print(f"Error processing status: {e}")
+        return "Error occurred while processing status"
 
-def cmd_moudle(args):
-    elem = args.split(' ')
-    try :
-        if len(elem) == 1:
-            if elem[0] == "takeoff":
-                cmd_sending("takeoff")
-            elif elem[0] == "land":
-                cmd_sending("land")
-        elif len(elem) > 1:
-            if elem[0] == "mode":
-                mode = elem[1]
-                #cmd_sending("mode " + mode)
-                if isinstance(mode, str):
-                    mode_map = control_func.mode_mapping()
-                    if mode_map is None or mode not in mode_map:
-                        print("Unknown mode '%s'" % mode)
-                    else:
-                        cmd_sending("mode " + mode)
-            elif elem[0] == "line" and elem[1] == "up":
-                cmd_sending("line up")
-            elif elem[0] == "follow":
-                if elem[1] == "on":
-                    cmd_sending("follow on")
-                elif elem[1] == "off":
-                    cmd_sending("follow off")
-    except :
-        pass
+def cmd_module(args: str) -> None:
+    elements = args.split()
+    
+    if not elements:
+        print("Error: No command provided")
+        return
 
-udp_service = threading.Thread(target = udp_listener)
-udp_service.start()
-udp_service.join(2)
-time.sleep(0.2)
+    command = elements[0]
+    params = elements[1:]
 
-pos_service = threading.Thread(target = boardcast_pos_loop)
-pos_service.start()
-pos_service.join(2)
-time.sleep(0.2)
+    command_handlers: Dict[str, Callable] = {
+        "takeoff": lambda: cmd_sending("takeoff"),
+        "land": lambda: cmd_sending("land"),
+        "mode": handle_mode,
+        "line": handle_line,
+        "follow": handle_follow
+    }
 
-while True:
     try:
-        inputdata = input("GatewayCMD > ")
-        cmd_moudle(inputdata)
-    except KeyboardInterrupt:
-        sys.exit(0)
+        handler = command_handlers.get(command)
+        if handler:
+            handler(*params)
+        else:
+            print(f"Error: Unknown command '{command}'")
+    except Exception as e:
+        print(f"Error executing command '{command}': {str(e)}")
+
+def handle_mode(mode: str) -> None:
+    mode_map = control_func.mode_mapping()
+    if not mode_map or mode not in mode_map:
+        print(f"Error: Unknown mode '{mode}'")
+    else:
+        cmd_sending(f"mode {mode}")
+
+def handle_line(direction: str) -> None:
+    if direction == "up":
+        cmd_sending("line up")
+    else:
+        print(f"Error: Unknown line direction '{direction}'")
+
+def handle_follow(state: str) -> None:
+    if state in ["on", "off"]:
+        cmd_sending(f"follow {state}")
+    else:
+        print(f"Error: Invalid follow state '{state}'")
+
+def main():
+    udp_service = threading.Thread(target=udp_listener, daemon=True)
+    pos_service = threading.Thread(target=broadcast_pos_loop, daemon=True)
+
+    udp_service.start()
+    pos_service.start()
+
+    while True:
+        try:
+            inputdata = input("[*] GatewayCMD >> ")
+            cmd_module(inputdata)
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            sys.exit(0)
+
+if __name__ == "__main__":
+    main()
